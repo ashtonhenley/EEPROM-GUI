@@ -1,0 +1,15 @@
+Product: AMETEK
+Version: E-87
+Speed: 1500
+Ramp: 1000
+PID KP: 16824
+PID KI: 1024
+KPD IV: 8
+KID IV: 1028
+KPD IV Log: 8
+KID IV Log: 1028
+Hall Phase: 165
+Speed Command: 1
+Enable: 1
+Rotation: 255
+Open Loop: 1
