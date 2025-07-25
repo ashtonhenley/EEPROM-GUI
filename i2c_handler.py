@@ -33,8 +33,8 @@ class parse_data:
         self.data = data
 
     def split(self):
-        # data should be a list or bytes-like object of length 48
-        assert len(self.data) == 48, "Data must be 48 bytes"
+        # data should be a list or bytes-like object of length 52
+        assert len(self.data) == 52, "Data must be 52 bytes"
         result = {}
         idx = 0
         result['block1_12'] = self.data[idx:idx+12]
@@ -48,6 +48,8 @@ class parse_data:
         result['block5_1s'] = [self.data[idx], self.data[idx+1], self.data[idx+2]]
         idx += 3
         result['ol_voltage_factor'] = self.data[idx]
+        # Add CRC (last 4 bytes, little-endian)
+        result['crc'] = self.data[idx:idx+4]
         return result
     
 class convert_data:

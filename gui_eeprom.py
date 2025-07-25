@@ -40,7 +40,7 @@ class EEPROMGUI:
 
         self.param_labels = [
             "Product", "Version", "Speed", "Ramp", "PID KP", "PID KI", "KPD IV", "KID IV",
-            "KPD IV Log", "KID IV Log", "Hall Phase", "Speed Command", "Enable", "Rotation", "Open Loop", "OL Voltage Factor"
+            "KPD IV Log", "KID IV Log", "Hall Phase", "Speed Command", "Enable", "Rotation", "Open Loop", "OL Voltage Factor", "CRC Checksum"
         ]
         self.param_vars = {}
 
@@ -59,6 +59,9 @@ class EEPROMGUI:
             entry = tk.Entry(param_frame, textvariable=var, width=22, font=font_entry,
                             bg=self.current_theme["ENTRY"], fg=self.current_theme["LABEL"], insertbackground=self.current_theme["LABEL"],
                             highlightbackground=self.current_theme["HIGHLIGHT"], highlightcolor=self.current_theme["HIGHLIGHT"], relief="flat")
+            # Ensure CRC is read only for the user
+            if label == "CRC Checksum":
+                entry.configure(state="readonly")
             entry.grid(row=i, column=1, padx=8, pady=4)
             self.param_vars[label] = var
 
@@ -103,11 +106,12 @@ class EEPROMGUI:
         )
         self.output_text.pack(fill="both", expand=True)
         self.apply_theme()
+
     # If the "read" button is selected, we get a read event
     def read_eeprom(self):
         try:
             print("Read button clicked")
-            total_bytes = 48
+            total_bytes = 52  # 48 data + 4 CRC
             chunk_size = 10
             addr = 64
             end_addr = addr + total_bytes
@@ -121,8 +125,8 @@ class EEPROMGUI:
                 addr += to_read
 
             # Pad with zeros if not enough data
-            if len(all_data) < 48:
-                all_data.extend([0] * (48 - len(all_data)))
+            if len(all_data) < 52:
+                all_data.extend([0] * (52 - len(all_data)))
 
             self.output_text.delete(1.0, tk.END)
             self.output_text.insert(tk.END, ', '.join(str(b) for b in all_data))
@@ -159,11 +163,29 @@ class EEPROMGUI:
             # OL Voltage Factor: 1 byte (last byte)
             ol_voltage_factor = segments.get('ol_voltage_factor', 0)
             self.param_vars["OL Voltage Factor"].set(ol_voltage_factor)
+            print("READING:")
+            print(f"Data for CRC (first 10): {[hex(b) for b in all_data[:10]]}")
+            print(f"Data for CRC (last 10): {[hex(b) for b in all_data[38:48]]}")
+            crc_calc = binascii.crc32(bytes(all_data[:48]), 0xFFFFFFFF) & 0xFFFFFFFF
+            print(f"Calculated CRC: 0x{crc_calc:08X}")
+            # CRC Checksum: 4 bytes 
+            crc_bytes = all_data[48:52]
+            crc_stored = int.from_bytes(crc_bytes, byteorder='little')  # No reverse!
+            self.param_vars["CRC Checksum"].set(f"0x{crc_stored:08X}")
+
+            # Optionally, check CRC and display in output_text
+            crc_calc = binascii.crc32(bytes(all_data[:48]), 0xFFFFFFFF) & 0xFFFFFFFF
+            self.output_text.insert(tk.END, f"\nStored CRC32: 0x{crc_stored:08X}")
+            self.output_text.insert(tk.END, f"\nCalc'd CRC32: 0x{crc_calc:08X}")
+            if crc_stored == crc_calc:
+                self.output_text.insert(tk.END, "\nCRC OK")
+            else:
+                self.output_text.insert(tk.END, "\nCRC MISMATCH")
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             messagebox.showerror("Read Error", f"{e}")
-
     # If the "write" button is selected, we get a write event
     def write_eeprom(self):
         try:
@@ -216,12 +238,29 @@ class EEPROMGUI:
             if len(values) != 48:
                 raise ValueError(f"Data length is {len(values)}, expected 48 bytes.")
 
+            # Calculate CRC32 (STM32 style)
+            crc_val = binascii.crc32(bytes(values), 0xFFFFFFFF) & 0xFFFFFFFF
+            crc_bytes = crc_val.to_bytes(4, byteorder='little')
+            values.extend(crc_bytes)  # No reverse!
+
             self.i2c.write_data(values, 64)
+           
             messagebox.showinfo("Write Success", "Data written successfully.")
         except Exception as e:
             import traceback
             traceback.print_exc()
             messagebox.showerror("Write Error", str(e))
+
+    def stm32_crc32(self, data_bytes):
+        """
+        Calculate CRC32 as STM32 hardware CRC peripheral does (default settings).
+        :param data_bytes: bytes or bytearray
+        :return: 32-bit CRC as unsigned int
+        """
+        # STM32 starts with 0xFFFFFFFF and does NOT invert the result
+        crc = binascii.crc32(data_bytes, 0xFFFFFFFF)
+        return crc & 0xFFFFFFFF
+
     def save_to_file(self):
         try:
             file_path = filedialog.asksaveasfilename(
