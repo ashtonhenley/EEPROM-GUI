@@ -3,8 +3,29 @@ from tkinter import messagebox
 from i2c_handler import I2CHandler, parse_data
 from tkinter import filedialog
 import binascii
+
+class Crc32:
+    crc_table = {}
+
+    def __init__(self, _poly):
+        for i in range(256):
+            c = i << 24
+            for j in range(8):
+                c = (c << 1) ^ _poly if (c & 0x80000000) else c << 1
+            self.crc_table[i] = c & 0xFFFFFFFF
+
+    def calculate(self, buf):
+        crc = 0xFFFFFFFF
+        for byte in buf:  # process bytes in order, like STM32
+            crc = ((crc << 8) & 0xFFFFFFFF) ^ self.crc_table[(crc >> 24) ^ byte]
+        return crc
+
+    def crc_int_to_bytes(self, i):
+        return [(i >> 24) & 0xFF, (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF]
+    
 class EEPROMGUI:
     def __init__(self, i2c, master):
+        self.crc32 = Crc32(0x04C11DB7)
         self.dark_theme = {
             "BG": "#23272e",
             "PANEL": "#2c313c",
@@ -111,30 +132,33 @@ class EEPROMGUI:
     def read_eeprom(self):
         try:
             print("Read button clicked")
-            total_bytes = 52  # 48 data + 4 CRC
-            chunk_size = 10
+            # --- Read 48 bytes from memory address 64 (0x0040) in chunks of 10 ---
             addr = 64
-            end_addr = addr + total_bytes
-            all_data = []
-            while addr < end_addr:
-                to_read = min(chunk_size, end_addr - addr)
-                print(f"Reading from addr={addr}, length={to_read}")
-                data = self.i2c.read_data(addr, to_read)
-                print(f"Data received: {data}")
-                all_data.extend(data)
+            total_bytes = 48
+            chunk_size = 10
+            data_48 = []
+            bytes_left = total_bytes
+            while bytes_left > 0:
+                to_read = min(chunk_size, bytes_left)
+                chunk = self.i2c.i2c_port.exchange([addr >> 8, addr & 0xFF], to_read)
+                data_48.extend(chunk)
                 addr += to_read
+                bytes_left -= to_read
+            print("Read 48 bytes from 0x0040:", list(data_48))
 
-            # Pad with zeros if not enough data
-            if len(all_data) < 52:
-                all_data.extend([0] * (52 - len(all_data)))
+            # --- Read 4 bytes from memory address 256 (0x0100) in one chunk ---
+            crc_bytes = self.i2c.i2c_port.exchange([0x01, 0x00], 4)
+            print("Read 4 bytes from 0x0100:", list(crc_bytes))
 
+            # Combine and display in output_text
             self.output_text.delete(1.0, tk.END)
-            self.output_text.insert(tk.END, ', '.join(str(b) for b in all_data))
+            self.output_text.insert(tk.END, "Data: " + ', '.join(str(b) for b in data_48))
+            self.output_text.insert(tk.END, "\nCRC: " + ', '.join(str(b) for b in crc_bytes))
 
-            parsed_data = parse_data(all_data)
+            # Parse and update GUI fields
+            parsed_data = parse_data(data_48)
             segments = parsed_data.split()
 
-            # Fill in fields, using blanks or zeros if missing
             # Product (12 bytes, ASCII)
             product_bytes = segments.get('block1_12', [0]*12)
             product_str = ''.join(chr(b) for b in product_bytes).rstrip('\x00')
@@ -145,7 +169,7 @@ class EEPROMGUI:
             version_str = ''.join(chr(b) for b in version_bytes).rstrip('\x00')
             self.param_vars["Version"].set(version_str)
 
-            # 2-byte fields (speed, ramp, pid_kp, pid_ki, kpdiv, kidiv, kpdiv_log, kidiv_log, hall phase)
+            # 2-byte fields
             block3_2s = segments.get('block3_2s', [[0, 0]]*9)
             for i, label in enumerate(["Speed", "Ramp", "PID KP", "PID KI", "KPD IV", "KID IV", "KPD IV Log", "KID IV Log", "Hall Phase"]):
                 val = int.from_bytes(block3_2s[i], byteorder='little', signed=False)
@@ -155,28 +179,23 @@ class EEPROMGUI:
             speed_command_val = int.from_bytes(block4_4, byteorder='little', signed=False)
             self.param_vars["Speed Command"].set(speed_command_val)
 
-            # Enable, Rotation, Open Loop: 1 byte each (from block5_1s)
             block5_1s = segments.get('block5_1s', [0]*3)
             for i, label in enumerate(["Enable", "Rotation", "Open Loop"]):
                 self.param_vars[label].set(block5_1s[i])
 
-            # OL Voltage Factor: 1 byte (last byte)
             ol_voltage_factor = segments.get('ol_voltage_factor', 0)
             self.param_vars["OL Voltage Factor"].set(ol_voltage_factor)
-            print("READING:")
-            print(f"Data for CRC (first 10): {[hex(b) for b in all_data[:10]]}")
-            print(f"Data for CRC (last 10): {[hex(b) for b in all_data[38:48]]}")
-            crc_calc = binascii.crc32(bytes(all_data[:48]), 0xFFFFFFFF) & 0xFFFFFFFF
-            print(f"Calculated CRC: 0x{crc_calc:08X}")
-            # CRC Checksum: 4 bytes 
-            crc_bytes = all_data[48:52]
-            crc_stored = int.from_bytes(crc_bytes, byteorder='little')  # No reverse!
-            self.param_vars["CRC Checksum"].set(f"0x{crc_stored:08X}")
 
-            # Optionally, check CRC and display in output_text
-            crc_calc = binascii.crc32(bytes(all_data[:48]), 0xFFFFFFFF) & 0xFFFFFFFF
+            
+            # CRC Checksum: 4 bytes
+            crc_stored = int.from_bytes(crc_bytes, byteorder='big')  # or 'big' if STM32 stores big-endian
+            crc_calc = self.crc32.calculate(data_48)
+
+            self.param_vars["CRC Checksum"].set(f"0x{crc_stored:08X}")  
+
             self.output_text.insert(tk.END, f"\nStored CRC32: 0x{crc_stored:08X}")
             self.output_text.insert(tk.END, f"\nCalc'd CRC32: 0x{crc_calc:08X}")
+
             if crc_stored == crc_calc:
                 self.output_text.insert(tk.END, "\nCRC OK")
             else:
@@ -188,6 +207,7 @@ class EEPROMGUI:
             messagebox.showerror("Read Error", f"{e}")
     # If the "write" button is selected, we get a write event
     def write_eeprom(self):
+        
         try:
             values = []
             # Product: 12 bytes, ASCII
@@ -238,28 +258,22 @@ class EEPROMGUI:
             if len(values) != 48:
                 raise ValueError(f"Data length is {len(values)}, expected 48 bytes.")
 
-            # Calculate CRC32 (STM32 style)
-            crc_val = binascii.crc32(bytes(values), 0xFFFFFFFF) & 0xFFFFFFFF
-            crc_bytes = crc_val.to_bytes(4, byteorder='little')
-            values.extend(crc_bytes)  # No reverse!
+            # Calculate CRC32
+            
+            crc_val = self.crc32.calculate(values)
+            crc_bytes = crc_val.to_bytes(4, byteorder='big')
 
+            # Write 48 bytes to address 64
             self.i2c.write_data(values, 64)
-           
-            messagebox.showinfo("Write Success", "Data written successfully.")
+            # Write CRC to address 256
+            self.i2c.write_data(crc_bytes, 256)
+
+            messagebox.showinfo("Write Success", "Data and CRC written successfully.")
         except Exception as e:
             import traceback
             traceback.print_exc()
             messagebox.showerror("Write Error", str(e))
 
-    def stm32_crc32(self, data_bytes):
-        """
-        Calculate CRC32 as STM32 hardware CRC peripheral does (default settings).
-        :param data_bytes: bytes or bytearray
-        :return: 32-bit CRC as unsigned int
-        """
-        # STM32 starts with 0xFFFFFFFF and does NOT invert the result
-        crc = binascii.crc32(data_bytes, 0xFFFFFFFF)
-        return crc & 0xFFFFFFFF
 
     def save_to_file(self):
         try:

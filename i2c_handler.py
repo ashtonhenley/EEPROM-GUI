@@ -34,7 +34,7 @@ class parse_data:
 
     def split(self):
         # data should be a list or bytes-like object of length 52
-        assert len(self.data) == 52, "Data must be 52 bytes"
+        assert len(self.data) == 48, "Data must be 52 bytes"
         result = {}
         idx = 0
         result['block1_12'] = self.data[idx:idx+12]
